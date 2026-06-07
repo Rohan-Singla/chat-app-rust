@@ -1,5 +1,8 @@
 use axum::{routing::get, Router};
+use socketioxide::{SocketIo, extract::SocketRef};
 use tokio::net::TcpListener;
+use tower::ServiceBuilder;
+use tower_http::cors::CorsLayer;
 use tracing::info;
 use tracing_subscriber::FmtSubscriber;
 
@@ -7,7 +10,20 @@ use tracing_subscriber::FmtSubscriber;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::subscriber::set_global_default(FmtSubscriber::new())?;
 
-    let app = Router::new().route("/", get(|| async { "Hello world" }));
+    let (layer,io) = SocketIo::new_layer();
+
+    io.ns("/", on_connect);
+
+    
+
+    let app = Router::new().route("/", get(|| async { "Hello world" }))
+    
+    .layer(
+        ServiceBuilder::new()
+        .layer(CorsLayer::permissive()).
+        layer(layer),
+    
+    );
 
     info!("starting server...");
 
@@ -16,4 +32,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+async fn on_connect (socket : SocketRef){
+
+    info!("socket connected ! {:#?}" , socket.id);
+
 }
