@@ -1,11 +1,9 @@
 import { Fragment, useState, useRef, useEffect } from "react";
 import "./App.css";
 import { ChevronRightIcon } from "@heroicons/react/20/solid";
-import { io } from "socket.io-client";
-import { Dialog, Menu, Transition } from "@headlessui/react";
+import { Dialog, Transition } from "@headlessui/react";
 import {
   Bars3Icon,
-  Cog6ToothIcon,
   XMarkIcon,
 } from "@heroicons/react/24/outline";
 
@@ -39,60 +37,77 @@ function App() {
   const [input, setInput] = useState("");
   const [currentRoom, setCurrentRoom] = useState("General");
   const [name, setName] = useState(null);
-  const [socket, setSocket] = useState(null);
-  const [connected, setConnected] = useState(false);
+  const wsRef = useRef(null);
   const onceRef = useRef(false);
+  const [connected, setConnected] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   useEffect(() => {
     setMessages([]);
-    socket?.emit("join", currentRoom);
-  }, [currentRoom]);
 
-  useEffect(() => {
-    if (onceRef.current) {
+    if (!wsRef.current) {
       return;
     }
 
-    onceRef.current = true;
+    wsRef.current.send(
+      JSON.stringify({
+        type: "join",
+        room: currentRoom,
+      })
+    );
+  }, [currentRoom]);
 
-    const socket = io("ws://localhost:3000");
-    setSocket(socket);
 
-    socket.on("connect", () => {
-      console.log("Connected to socket server");
-      setName(`anon-${socket.id}`);
-      setConnected(true);
-      console.log("joining room", currentRoom);
+  useEffect(() => {
+    const ws = new WebSocket("ws://localhost:3000/ws");
 
-      socket.emit("join", currentRoom);
-    });
+    wsRef.current = ws;
 
-    socket.on("message", (msg) => {
-      console.log("Message received", msg);
-      msg.date = new Date(msg.date);
-      setMessages((messages) => [...messages, msg]);
-    });
+    ws.onopen = () => {
+      console.log("connected");
 
-    socket.on("messages", (msgs) => {
-      console.log("Messages received", msgs);
-      let messages = msgs.messages.map((msg) => {
-        msg.date = new Date(msg.date);
-        return msg;
-      });
-      setMessages(messages);
-    });
+      ws.send(
+        JSON.stringify({
+          type: "join",
+          room: "General",
+        })
+      );
+    };
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      console.log(data);
+    };
+
+    ws.onclose = () => {
+      console.log("closed");
+    };
+
+    return () => {
+      ws.close();
+    };
   }, []);
 
   const sendMessage = (e) => {
     e.preventDefault();
-    socket?.emit("message", {
-      text: input,
-      room: currentRoom,
-    });
-    setInput("");
-  };
 
+    const ws = wsRef.current;
+  
+    if (!ws) return;
+  
+    if (ws.readyState !== WebSocket.OPEN) {
+      console.log("socket not ready");
+      return;
+    }
+  
+    ws.send(
+      JSON.stringify({
+        type: "message",
+        room: currentRoom,
+        text: input,
+      })
+    );
+  };
   const rooms = [
     "General",
     "C++",
