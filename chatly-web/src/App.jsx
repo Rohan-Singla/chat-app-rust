@@ -44,12 +44,11 @@ function App() {
 
   useEffect(() => {
     setMessages([]);
-
-    if (!wsRef.current) {
-      return;
-    }
-
-    wsRef.current.send(
+  
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  
+    ws.send(
       JSON.stringify({
         type: "join",
         room: currentRoom,
@@ -60,12 +59,11 @@ function App() {
 
   useEffect(() => {
     const ws = new WebSocket("ws://localhost:3000/ws");
-
     wsRef.current = ws;
-
+  
     ws.onopen = () => {
       console.log("connected");
-
+  
       ws.send(
         JSON.stringify({
           type: "join",
@@ -73,32 +71,34 @@ function App() {
         })
       );
     };
-
+  
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      console.log(data);
+      console.log("recv:", data);
+  
+      // Only handle chat messages
+      setMessages((prev) => [
+        ...prev,
+        {
+          user: data.room || "system",
+          text: data.text,
+          date: new Date(),
+        },
+      ]);
     };
-
+  
     ws.onclose = () => {
       console.log("closed");
     };
-
-    return () => {
-      ws.close();
-    };
+  
+    return () => ws.close();
   }, []);
 
   const sendMessage = (e) => {
     e.preventDefault();
-
+  
     const ws = wsRef.current;
-  
-    if (!ws) return;
-  
-    if (ws.readyState !== WebSocket.OPEN) {
-      console.log("socket not ready");
-      return;
-    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
   
     ws.send(
       JSON.stringify({
@@ -107,6 +107,8 @@ function App() {
         text: input,
       })
     );
+  
+    setInput("");
   };
   const rooms = [
     "General",

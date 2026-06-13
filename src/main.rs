@@ -8,19 +8,36 @@ use axum::{
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
-use tokio::sync::broadcast;
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{broadcast, RwLock};
 
 #[derive(Clone)]
 struct AppState {
-    tx: broadcast::Sender<String>,
+    rooms: Arc<RwLock<HashMap<String, broadcast::Sender<String>>>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum ClientMessage {
+    #[serde(rename = "join")]
+    Join { room: String },
+
+    #[serde(rename = "message")]
+    Message { room: String, text: String },
+}
+
+#[derive(Debug, Serialize)]
+struct ServerMessage {
+    room: String,
+    text: String,
 }
 
 #[tokio::main]
 async fn main() {
-    let (tx, _) = broadcast::channel::<String>(100);
-
-    let state = Arc::new(AppState { tx });
+    let state = Arc::new(AppState {
+        rooms: Arc::new(RwLock::new(HashMap::new())),
+    });
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
@@ -32,9 +49,7 @@ async fn main() {
 
     println!("Server running on 0.0.0.0:3000");
 
-    axum::serve(listener, app)
-        .await
-        .unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 
 async fn ws_handler(
@@ -44,54 +59,95 @@ async fn ws_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(
-    socket: WebSocket,
-    state: Arc<AppState>,
-) {
+async fn get_room_sender(
+    state: &AppState,
+    room: &str,
+) -> broadcast::Sender<String> {
+    let mut rooms = state.rooms.write().await;
+
+    rooms
+        .entry(room.to_string())
+        .or_insert_with(|| {
+            let (tx, _) = broadcast::channel(100);
+            tx
+        })
+        .clone()
+}
+
+async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     println!("Client connected");
 
     let (mut sender, mut receiver) = socket.split();
 
-    let tx = state.tx.clone();
-    let mut rx = tx.subscribe();
+    let mut room_rx: Option<broadcast::Receiver<String>> = None;
+    let mut current_room: Option<String> = None;
 
-    // Task: receive messages from client
-    let receive_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = receiver.next().await {
-            match msg {
-                Message::Text(text) => {
-                    println!("Received: {}", text);
+    loop {
+        tokio::select! {
 
-                    let _ = tx.send(text.to_string());
-                }
-
-                Message::Close(_) => {
-                    println!("Client disconnected");
+            msg = receiver.next() => {
+                let Some(Ok(msg)) = msg else {
                     break;
+                };
+
+                match msg {
+                    Message::Text(text) => {
+
+                        let parsed: ClientMessage = match serde_json::from_str(&text) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+
+                        match parsed {
+
+                            ClientMessage::Join { room } => {
+                                println!("Joining room: {}", room);
+
+                                let tx = get_room_sender(&state, &room).await;
+
+                                room_rx = Some(tx.subscribe());
+                                current_room = Some(room);
+                            }
+
+                            ClientMessage::Message { room, text } => {
+                                let tx = get_room_sender(&state, &room).await;
+
+                                let payload = serde_json::to_string(
+                                    &ServerMessage {
+                                        room: room.clone(),
+                                        text,
+                                    }
+                                ).unwrap();
+
+                                let _ = tx.send(payload);
+                            }
+                        }
+                    }
+
+                    Message::Close(_) => {
+                        break;
+                    }
+
+                    _ => {}
                 }
+            }
 
-                _ => {}
+            broadcast_msg = async {
+                match &mut room_rx {
+                    Some(rx) => rx.recv().await.ok(),
+                    None => None,
+                }
+            }, if room_rx.is_some() => {
+
+                if let Some(msg) = broadcast_msg {
+
+                    if sender.send(Message::Text(msg.into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
-    });
-
-    // Task: send broadcast messages to client
-    let send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            if sender
-                .send(Message::Text(msg.into()))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-
-    tokio::select! {
-        _ = receive_task => {}
-        _ = send_task => {}
     }
 
-    println!("Connection closed");
+    println!("Client disconnected from {:?}", current_room);
 }
